@@ -1,0 +1,144 @@
+# EventPass - definicion base de los servicios. Compatible con Docker Swarm (docker stack deploy)
+# y con Docker Compose. Las imagenes vienen de un registro (GHCR); para construirlas en local
+# usa ademas docker-compose.local.yml (ver README).
+#
+#   Swarm:  docker stack deploy -c docker-compose.yml --with-registry-auth eventpass
+#   Local:  docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-eventpass}
+    configs:
+      - source: init_db
+        target: /docker-entrypoint-initdb.d/init.sql
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [eventpass]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]   # el volumen vive en el manager
+      restart_policy:
+        condition: on-failure
+
+  auth-service:
+    image: ${REGISTRY:-eventpass}/eventpass-auth-service:${TAG:-latest}
+    environment: &env-comun
+      DB_URL: jdbc:postgresql://postgres:5432/auth
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-eventpass}
+      JWT_SECRET: ${JWT_SECRET:-clave-solo-para-desarrollo-local-32-caracteres!}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-key}
+      GATEWAY_KEY: ${GATEWAY_KEY:-}
+      SEED_COMPRADOR_PASSWORD: ${SEED_COMPRADOR_PASSWORD:-Comprador123!}
+      SEED_STAFF_PASSWORD: ${SEED_STAFF_PASSWORD:-Staff123!}
+    ports:
+      - "8081:8081"
+    networks: [eventpass]
+    depends_on: [postgres]
+    deploy:
+      replicas: 2
+      update_config: &update
+        parallelism: 1
+        delay: 10s
+        order: start-first          # actualizacion sin caida del servicio
+        failure_action: rollback
+      rollback_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  eventos-service:
+    image: ${REGISTRY:-eventpass}/eventpass-eventos-service:${TAG:-latest}
+    environment:
+      <<: *env-comun
+      DB_URL: jdbc:postgresql://postgres:5432/eventos
+    ports:
+      - "8082:8082"
+    networks: [eventpass]
+    depends_on: [postgres]
+    deploy:
+      replicas: 2
+      update_config: *update
+      rollback_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  ordenes-service:
+    image: ${REGISTRY:-eventpass}/eventpass-ordenes-service:${TAG:-latest}
+    environment:
+      <<: *env-comun
+      DB_URL: jdbc:postgresql://postgres:5432/ordenes
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-http://elasticmq:9324/000000000000/ordenes-emision}
+    ports:
+      - "8083:8083"
+    networks: [eventpass]
+    depends_on: [postgres]
+    deploy:
+      replicas: 2
+      update_config: *update
+      rollback_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  tickets-service:
+    image: ${REGISTRY:-eventpass}/eventpass-tickets-service:${TAG:-latest}
+    environment:
+      <<: *env-comun
+      DB_URL: jdbc:postgresql://postgres:5432/tickets
+    ports:
+      - "8084:8084"
+    networks: [eventpass]
+    depends_on: [postgres]
+    deploy:
+      replicas: 2
+      update_config: *update
+      rollback_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+networks:
+  eventpass:
+    driver: overlay      # en Swarm es overlay; Compose lo trata como red de contenedores del proyecto
+
+volumes:
+  pgdata:
+
+configs:
+  init_db:
+    file: ./docker/init-db.sql

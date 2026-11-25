@@ -1,0 +1,22 @@
+# Maven / Java
+target/
+*.class
+*.jar
+!.mvn/wrapper/*.jar
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Entorno y secretos (NUNCA subir)
+.env
+*.pem
+*.key
+
+# SO
+.DS_Store
+Thumbs.db

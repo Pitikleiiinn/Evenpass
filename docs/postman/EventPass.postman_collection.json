@@ -1,0 +1,454 @@
+{
+  "info": {
+    "name": "EventPass - EP3",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Local: usa los puertos directos. Nube: pon la URL del API Gateway en las 4 variables *_url."
+  },
+  "variable": [
+    {
+      "key": "auth_url",
+      "value": "http://localhost:8081"
+    },
+    {
+      "key": "eventos_url",
+      "value": "http://localhost:8082"
+    },
+    {
+      "key": "ordenes_url",
+      "value": "http://localhost:8083"
+    },
+    {
+      "key": "tickets_url",
+      "value": "http://localhost:8084"
+    },
+    {
+      "key": "token_comprador",
+      "value": ""
+    },
+    {
+      "key": "token_staff",
+      "value": ""
+    },
+    {
+      "key": "evento_id",
+      "value": "1"
+    },
+    {
+      "key": "orden_id",
+      "value": ""
+    },
+    {
+      "key": "codigo",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "auth /actuator/health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{auth_url}}/actuator/health"
+            }
+          }
+        },
+        {
+          "name": "eventos /actuator/health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{eventos_url}}/actuator/health"
+            }
+          }
+        },
+        {
+          "name": "ordenes /actuator/health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordenes_url}}/actuator/health"
+            }
+          }
+        },
+        {
+          "name": "tickets /actuator/health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{tickets_url}}/actuator/health"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Autenticacion",
+      "item": [
+        {
+          "name": "Registro de comprador",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{auth_url}}/auth/registro"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Ana Prueba\",\n  \"email\": \"ana@eventpass.cl\",\n  \"password\": \"Clave12345\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Login comprador",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{auth_url}}/auth/login"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"comprador@eventpass.cl\",\n  \"password\": \"Comprador123!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('token_comprador', pm.response.json().token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login staff",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{auth_url}}/auth/login"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"staff@eventpass.cl\",\n  \"password\": \"Staff123!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('token_staff', pm.response.json().token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mi perfil",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{auth_url}}/auth/me"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Eventos",
+      "item": [
+        {
+          "name": "Listar eventos (comprador)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{eventos_url}}/eventos"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const e = pm.response.json(); if (e.length) pm.collectionVariables.set('evento_id', e[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear evento (staff)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_staff}}"
+              }
+            ],
+            "url": {
+              "raw": "{{eventos_url}}/eventos"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Evento Postman\",\n  \"lugar\": \"Auditorio\",\n  \"fecha\": \"2030-12-01T20:00:00\",\n  \"aforo\": 5,\n  \"precio\": 7000\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Compra (asincrona)",
+      "item": [
+        {
+          "name": "Crear orden -> 202 PENDIENTE_EMISION",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{ordenes_url}}/ordenes"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventoId\": \"{{evento_id}}\",\n  \"cantidad\": 1\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('orden_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar la orden (esperar EMITIDA)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{ordenes_url}}/ordenes/{{orden_id}}"
+            }
+          }
+        },
+        {
+          "name": "Mis ordenes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{ordenes_url}}/ordenes/mis-ordenes"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Tickets",
+      "item": [
+        {
+          "name": "Mis tickets (codigos de acceso)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{tickets_url}}/tickets/mis-tickets"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const t = pm.response.json(); if (t.length) pm.collectionVariables.set('codigo', t[0].codigo);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Validar codigo (staff) -> 200 la primera vez",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_staff}}"
+              }
+            ],
+            "url": {
+              "raw": "{{tickets_url}}/tickets/validar"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"codigo\": \"{{codigo}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Validar el mismo codigo -> 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_staff}}"
+              }
+            ],
+            "url": {
+              "raw": "{{tickets_url}}/tickets/validar"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"codigo\": \"{{codigo}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Validar como comprador -> 403",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token_comprador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{tickets_url}}/tickets/validar"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"codigo\": \"{{codigo}}\"\n}"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

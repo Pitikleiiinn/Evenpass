@@ -1,0 +1,175 @@
+name: CI/CD EventPass
+
+# push a main      -> test + build de imagenes + provision cloud + deploy en Swarm + prueba e2e
+# pull request     -> solo test y build de imagenes (sin publicar ni desplegar)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------ 1. TEST
+  test:
+    name: Test (${{ matrix.modulo }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        modulo: [auth-service, eventos-service, ordenes-service, tickets-service, lambda-emision]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: ${{ matrix.modulo }}/pom.xml
+      - name: Compilar y ejecutar pruebas unitarias
+        working-directory: ${{ matrix.modulo }}
+        run: mvn -B verify
+      - name: Guardar reportes de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-${{ matrix.modulo }}
+          path: ${{ matrix.modulo }}/target/surefire-reports
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ 2. BUILD + PUSH DE IMAGENES
+  docker:
+    name: Imagen Docker (${{ matrix.servicio }})
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.meta.outputs.owner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        servicio: [auth-service, eventos-service, ordenes-service, tickets-service]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nombre de propietario en minusculas (GHCR lo exige)
+        id: meta
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Login en GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir (y publicar si es push a main)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.servicio }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/eventpass-${{ matrix.servicio }}:${{ github.sha }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/eventpass-${{ matrix.servicio }}:latest
+          cache-from: type=gha,scope=${{ matrix.servicio }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.servicio }}
+
+  # ------------------------------------------------------------------ 3. PROVISION DE SERVICIOS CLOUD (IE5)
+  provision-cloud:
+    name: Provisionar SQS + Lambda + API Gateway
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      api_url: ${{ steps.provision.outputs.api_url }}
+      queue_url: ${{ steps.provision.outputs.queue_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: lambda-emision/pom.xml
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Crear/actualizar cola SQS, Lambda y API Gateway
+        id: provision
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+          BACKEND_HOST: ${{ secrets.EC2_HOST }}
+          GATEWAY_KEY: ${{ secrets.GATEWAY_KEY }}
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+        run: ./scripts/aws-provision.sh
+
+  # ------------------------------------------------------------------ 4. DEPLOY EN DOCKER SWARM
+  deploy:
+    name: Desplegar stack en Docker Swarm
+    needs: [docker, provision-cloud]
+    runs-on: ubuntu-latest
+    environment: produccion
+    steps:
+      - uses: actions/checkout@v4
+      - name: Agregar llave SSH del manager
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+      - name: Confiar en el host del manager
+        run: ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+      - name: Desplegar (docker stack deploy contra el manager por SSH)
+        env:
+          DOCKER_HOST: ssh://${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}
+          REGISTRY: ghcr.io/${{ needs.docker.outputs.owner }}
+          TAG: ${{ github.sha }}
+          SQS_QUEUE_URL: ${{ needs.provision-cloud.outputs.queue_url }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          GATEWAY_KEY: ${{ secrets.GATEWAY_KEY }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          SEED_COMPRADOR_PASSWORD: ${{ secrets.SEED_COMPRADOR_PASSWORD }}
+          SEED_STAFF_PASSWORD: ${{ secrets.SEED_STAFF_PASSWORD }}
+        run: |
+          test "$(docker info --format '{{.Swarm.ControlAvailable}}')" = "true" \
+            || { echo "El host no es un manager de Swarm: ejecuta scripts/swarm-init.sh primero"; exit 1; }
+          echo "${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker stack deploy --compose-file docker-compose.yml --with-registry-auth eventpass
+          docker stack services eventpass
+
+  # ------------------------------------------------------------------ 5. PRUEBA DE HUMO / E2E EN LA NUBE
+  smoke-test:
+    name: Prueba end-to-end contra el API Gateway
+    needs: [deploy, provision-cloud]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Esperar a que los servicios respondan a traves del gateway
+        env:
+          API_URL: ${{ needs.provision-cloud.outputs.api_url }}
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API_URL/auth/login" \
+              -H 'Content-Type: application/json' -d '{"email":"x@x.cl","password":"x"}')
+            # 401 = el servicio de autenticacion contesto (credenciales falsas), 403/5xx = aun no listo
+            [ "$code" = "401" ] && exit 0
+            echo "intento $i: HTTP $code"; sleep 10
+          done
+          echo "El API no respondio a tiempo"; exit 1
+      - name: Flujo completo + carga concurrente
+        env:
+          API_URL: ${{ needs.provision-cloud.outputs.api_url }}
+          COMPRADOR_PASS: ${{ secrets.SEED_COMPRADOR_PASSWORD }}
+          STAFF_PASS: ${{ secrets.SEED_STAFF_PASSWORD }}
+        run: ./scripts/e2e-test.sh

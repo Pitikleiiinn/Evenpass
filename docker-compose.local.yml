@@ -1,0 +1,56 @@
+# Complemento para trabajar en tu PC (sin AWS):
+#  - construye las imagenes desde el codigo fuente (build)
+#  - agrega ElasticMQ (SQS local) y el ejecutor local de la funcion Lambda
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build -d
+
+services:
+  auth-service:
+    build: ./auth-service
+    restart: on-failure   # espera a que Postgres termine de iniciar
+  eventos-service:
+    build: ./eventos-service
+    restart: on-failure   # espera a que Postgres termine de iniciar
+  tickets-service:
+    build: ./tickets-service
+    restart: on-failure   # espera a que Postgres termine de iniciar
+
+  ordenes-service:
+    build: ./ordenes-service
+    restart: on-failure
+    environment:
+      SQS_ENDPOINT: http://elasticmq:9324
+      SQS_QUEUE_URL: http://elasticmq:9324/000000000000/ordenes-emision
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on: [elasticmq]
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.9
+    ports:
+      - "9324:9324"
+    configs:
+      - source: elasticmq_conf
+        target: /opt/elasticmq.conf
+    networks: [eventpass]
+
+  # La misma funcion que corre como AWS Lambda, ejecutada localmente contra ElasticMQ
+  lambda-emision-local:
+    build: ./lambda-emision
+    environment:
+      SQS_ENDPOINT: http://elasticmq:9324
+      SQS_QUEUE_URL: http://elasticmq:9324/000000000000/ordenes-emision
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      EVENTOS_URL: http://eventos-service:8082
+      ORDENES_URL: http://ordenes-service:8083
+      TICKETS_URL: http://tickets-service:8084
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-key}
+    networks: [eventpass]
+    depends_on: [elasticmq, eventos-service, ordenes-service, tickets-service]
+    restart: on-failure
+
+configs:
+  elasticmq_conf:
+    file: ./docker/elasticmq.conf

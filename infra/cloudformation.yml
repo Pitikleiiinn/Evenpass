@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  EventPass - infraestructura serverless: cola SQS (+DLQ), funcion Lambda de emision de tickets
+  y Amazon API Gateway (HTTP API) que protege a los microservicios del backend.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eventpass
+  BackendHost:
+    Type: String
+    Description: IP publica o DNS del nodo del Swarm donde corren los microservicios (puertos 8081-8084).
+  GatewayKey:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Clave secreta que API Gateway inyecta en X-Gateway-Key; los microservicios rechazan todo lo que no la traiga.
+  InternalApiKey:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Clave que usa la Lambda para llamar a las rutas /internal/** de los microservicios.
+  LambdaCodeBucket:
+    Type: String
+    Description: Bucket S3 donde esta el .jar de la funcion.
+  LambdaCodeKey:
+    Type: String
+    Description: Ruta del .jar dentro del bucket.
+  LambdaRoleArn:
+    Type: String
+    Default: ""
+    Description: >
+      (Opcional) ARN de un rol IAM existente para la Lambda (ej. LabRole en AWS Academy).
+      Si se deja vacio, la plantilla crea el rol.
+  MaxLambdaConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 2
+    Description: Maximo de ejecuciones simultaneas de la funcion (protege a los microservicios).
+
+Conditions:
+  CrearRol: !Equals [!Ref LambdaRoleArn, ""]
+
+Resources:
+  # ------------------------------------------------------------------ SQS
+  OrdenesDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-ordenes-emision-dlq"
+      MessageRetentionPeriod: 1209600 # 14 dias para poder analizar mensajes fallidos
+
+  OrdenesQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-ordenes-emision"
+      VisibilityTimeout: 180 # >= timeout de la Lambda (30 s); da margen a los reintentos
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdenesDLQ.Arn
+        maxReceiveCount: 5
+
+  # ------------------------------------------------------------------ IAM
+  EmisionLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: CrearRol
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Logs en CloudWatch + leer/borrar mensajes de SQS (minimo necesario)
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+
+  # Politica para adjuntar al rol/perfil de la instancia EC2 que corre ordenes-service
+  OrdenesPublisherPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: CrearRol
+    Properties:
+      Description: Permite a ordenes-service publicar mensajes en la cola de emision
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrdenesQueue.Arn
+
+  # ------------------------------------------------------------------ Lambda (FaaS)
+  EmisionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-emision-tickets"
+      RetentionInDays: 14
+
+  EmisionLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: EmisionLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-emision-tickets"
+      Description: Consume la cola de ordenes, verifica aforo y emite tickets
+      Runtime: java21
+      Handler: cl.eventpass.lambda.EmisionTicketsHandler::handleRequest
+      MemorySize: 512
+      Timeout: 30
+      Role: !If [CrearRol, !GetAtt EmisionLambdaRole.Arn, !Ref LambdaRoleArn]
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          EVENTOS_URL: !Sub "http://${BackendHost}:8082"
+          ORDENES_URL: !Sub "http://${BackendHost}:8083"
+          TICKETS_URL: !Sub "http://${BackendHost}:8084"
+          INTERNAL_API_KEY: !Ref InternalApiKey
+
+  # La cola dispara la funcion (consumidor). ReportBatchItemFailures: solo reintenta los mensajes que fallan.
+  EmisionEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt OrdenesQueue.Arn
+      FunctionName: !Ref EmisionLambda
+      BatchSize: 5
+      MaximumBatchingWindowInSeconds: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      ScalingConfig:
+        MaximumConcurrency: !Ref MaxLambdaConcurrency
+
+  # ------------------------------------------------------------------ API Gateway (HTTP API)
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      Description: Unica puerta de entrada publica de EventPass
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [Authorization, Content-Type]
+
+  AuthIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8081/auth/{proxy}"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  EventosIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8082/eventos/{proxy}"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  EventosRaizIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8082/eventos"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  OrdenesIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8083/ordenes/{proxy}"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  OrdenesRaizIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8083/ordenes"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  TicketsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      IntegrationUri: !Sub "http://${BackendHost}:8084/tickets/{proxy}"
+      RequestParameters:
+        "overwrite:header.X-Gateway-Key": !Ref GatewayKey
+
+  # Solo se publican estas rutas. Las rutas /internal/** NO existen en el gateway.
+  RutaAuth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /auth/{proxy+}"
+      Target: !Sub "integrations/${AuthIntegration}"
+
+  RutaEventos:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /eventos/{proxy+}"
+      Target: !Sub "integrations/${EventosIntegration}"
+
+  RutaEventosRaiz:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /eventos"
+      Target: !Sub "integrations/${EventosRaizIntegration}"
+
+  RutaOrdenes:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /ordenes/{proxy+}"
+      Target: !Sub "integrations/${OrdenesIntegration}"
+
+  RutaOrdenesRaiz:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /ordenes"
+      Target: !Sub "integrations/${OrdenesRaizIntegration}"
+
+  RutaTickets:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /tickets/{proxy+}"
+      Target: !Sub "integrations/${TicketsIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 200 # proteccion ante abuso / picos al abrir la preventa
+        ThrottlingRateLimit: 100
+
+Outputs:
+  ApiUrl:
+    Description: URL publica del API Gateway (usala como base en Postman / el script e2e)
+    Value: !GetAtt HttpApi.ApiEndpoint
+  QueueUrl:
+    Description: URL de la cola SQS (variable SQS_QUEUE_URL de ordenes-service)
+    Value: !Ref OrdenesQueue
+  QueueArn:
+    Value: !GetAtt OrdenesQueue.Arn
+  DeadLetterQueueUrl:
+    Value: !Ref OrdenesDLQ
+  LambdaName:
+    Value: !Ref EmisionLambda
+  PublisherPolicyArn:
+    Condition: CrearRol
+    Description: Adjuntala al rol de la instancia EC2 que ejecuta ordenes-service
+    Value: !Ref OrdenesPublisherPolicy

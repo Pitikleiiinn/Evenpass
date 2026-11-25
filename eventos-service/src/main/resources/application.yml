@@ -1,0 +1,31 @@
+server:
+  port: ${PORT:8082}
+
+spring:
+  application:
+    name: eventos-service
+  datasource:
+    url: ${DB_URL:jdbc:h2:mem:eventosdb;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+eventpass:
+  security:
+    # Debe ser identico en todos los microservicios (minimo 32 caracteres para HS256)
+    jwt-secret: ${JWT_SECRET:clave-solo-para-desarrollo-local-32-caracteres!}
+    gateway-key: ${GATEWAY_KEY:}
+    internal-key: ${INTERNAL_API_KEY:dev-internal-key}
